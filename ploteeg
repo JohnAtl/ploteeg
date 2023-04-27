@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+
+import argparse
+from argparse import RawDescriptionHelpFormatter
+import mne
+from os.path import splitext
+import matplotlib.pyplot as plt
+
+
+def main():
+    # Training settings
+    parser = argparse.ArgumentParser(prog="ploteeg", description="""
+    Plot an eeg file using the mne toolbox.
+
+    Treats .eeg files as Nihon Kohden, rather than as an errant .vhdr, which is mne's default behavior.
+    Loads .fif files as is. Other files are loaded with the 'encoding="latin1"' argument to
+    support extended character sets.
+    """,
+                                     formatter_class=RawDescriptionHelpFormatter)
+    parser.add_argument("filename", help="filename to plot")
+    parser.add_argument("-s", "--scale", type=int, default=100, help="scale size in uV")
+    parser.add_argument("-t", "--start", type=int, default=0, help="starting time in seconds")
+    parser.add_argument(
+        "-d", "--duration", type=int, default=10, help="duration shown in seconds"
+    )
+    parser.add_argument("-b", "--bgcolor", default="w", help="background color")
+    parser.add_argument("-l", "--lowpass", type=int, default=None)
+    parser.add_argument("-u", "--highpass", type=int, default=None)
+    parser.add_argument(
+        "-o", "--save",
+        help="save a screenshot as filename_start.png, and exit",
+        action="store_true",
+    )
+    parser.add_argument("-f", "--savename", help="filename to save the screenshot as")
+    parser.add_argument("-x", "--width", type=int, default=30, help="size of the plot in inches (inches, I know)")
+    parser.add_argument("-y", "--height", type=int, default=10, help="size of the plot in inches")
+    args = parser.parse_args()
+
+    root, ext = splitext(args.filename)
+    if ext.lower() == ".eeg":
+        eeg = mne.io.read_raw_nihon(args.filename, preload=True)
+    elif ext.lower() == ".fif":
+        eeg = mne.io.read_raw(args.filename, preload=True)
+    else:
+        eeg = mne.io.read_raw(args.filename, preload=True, encoding="latin1")
+
+    fig = eeg.plot(
+        scalings=dict(eeg=args.scale / 2000000),
+        start=args.start,
+        duration=args.duration,
+        bgcolor=args.bgcolor,
+        highpass=args.highpass,
+        lowpass=args.lowpass,
+        block=True,
+        show=False,
+    )
+    fig.set_figheight(args.height)
+    fig.set_figwidth(args.width)
+    fig.set_layout_engine("tight")
+
+    if args.save:
+        if args.savename == None:
+            filename = f"{root}_{args.start}.png"
+        else:
+            filename = args.savename
+        plt.savefig(filename)
+        print(f"Saved {filename}")
+    else:
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
