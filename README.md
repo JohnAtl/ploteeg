@@ -1,9 +1,6 @@
 # ploteeg
     Plot an eeg file using the mne toolbox.
 
-
-    Plot an eeg file using the mne toolbox.
-
     Treats .eeg files as Nihon Kohden, rather than as an errant .vhdr, which is mne's default behavior.
     Loads .fif files as is. Other files are loaded with the 'encoding="latin1"' argument to
     support extended character sets.
