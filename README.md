@@ -1,5 +1,5 @@
 # ploteeg
-  Plot a continuous (raw) or epoched eeg files using the mne toolbox.
+  Plot continuous (raw) or epoched eeg files using the mne toolbox.
   Allows interaction with the plot (scrolling), or capturing screenshots
   from the command line.
 
