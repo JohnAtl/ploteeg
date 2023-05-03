@@ -5,7 +5,7 @@
     Loads .fif files as is. Other files are loaded with the 'encoding="latin1"' argument to
     support extended character sets.
 
-``` bash
+``` text
 
 
 usage: ploteeg [-h] [-s SCALE] [-t START] [-d DURATION] [-e EPOCHS] [-b BGCOLOR] [-l LOWPASS] [-u HIGHPASS] [-o] [-f SAVENAME] [-x WIDTH] [-y HEIGHT] [-p PICK] filename
