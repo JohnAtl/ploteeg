@@ -9,51 +9,136 @@ import matplotlib.pyplot as plt
 
 def main():
     # Training settings
-    parser = argparse.ArgumentParser(prog="ploteeg", description="""
+    parser = argparse.ArgumentParser(
+        prog="ploteeg",
+        description="""
     Plot an eeg file using the mne toolbox.
 
-    Treats .eeg files as Nihon Kohden, rather than as an errant .vhdr, which is mne's default behavior.
-    Loads .fif files as is. Other files are loaded with the 'encoding="latin1"' argument to
+    Files ending in _epo.fif, .set, .mat, and .sqd are treated as epoched data.
+    Files ending in .eeg are treated as Nihon Kohden data.
+    Files that end in .fif are treated as continuous data.
+    Other file extensions will try to be loaded with the default mne behavior, 
+    with the addition of the 'encoding="latin1"' argument to
     support extended character sets.
     """,
-                                     formatter_class=RawDescriptionHelpFormatter)
-    parser.add_argument("filename", help="filename to plot")
-    parser.add_argument("-s", "--scale", type=int, default=100, help="scale size in uV")
-    parser.add_argument("-t", "--start", type=int, default=0, help="starting time in seconds")
-    parser.add_argument(
-        "-d", "--duration", type=int, default=10, help="duration shown in seconds"
+        formatter_class=RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-b", "--bgcolor", default="w", help="background color")
+    parser.add_argument("filename", help="filename to plot")
+    parser.add_argument(
+        "-s", "--scale", type=str, default=100, help="scale size in uV, or 'auto'"
+    )
+    parser.add_argument(
+        "-t",
+        "--start",
+        type=int,
+        default=0,
+        help="starting time in seconds (for continuous data)",
+    )
+    parser.add_argument(
+        "-d",
+        "--duration",
+        type=int,
+        default=10,
+        help="duration to show in seconds (for continuous data)",
+    )
+    parser.add_argument(
+        "-e",
+        "--epochs",
+        type=int,
+        default=5,
+        help="number of epochs to display (for epoched data)",
+    )
+    parser.add_argument(
+        "-b", "--bgcolor", default="w", help="background color (for continuous data)"
+    )
     parser.add_argument("-l", "--lowpass", type=int, default=None)
     parser.add_argument("-u", "--highpass", type=int, default=None)
     parser.add_argument(
-        "-o", "--save",
+        "-o",
+        "--save",
         help="save a screenshot as filename_start.png, and exit",
         action="store_true",
     )
     parser.add_argument("-f", "--savename", help="filename to save the screenshot as")
-    parser.add_argument("-x", "--width", type=int, default=30, help="size of the plot in inches (inches, I know)")
-    parser.add_argument("-y", "--height", type=int, default=10, help="size of the plot in inches")
+    parser.add_argument(
+        "-x",
+        "--width",
+        type=int,
+        default=30,
+        help="size of the plot in inches (inches, I know)",
+    )
+    parser.add_argument(
+        "-y", "--height", type=int, default=10, help="size of the plot in inches"
+    )
+    parser.add_argument(
+        "-p",
+        "--pick",
+        type=str,
+        default=None,
+        help="channel name filter, e.g. FP matches FP1, FP2, etc. channels",
+    )
     args = parser.parse_args()
 
     root, ext = splitext(args.filename)
-    if ext.lower() == ".eeg":
+    ext = ext.lower()
+    if (root[-4:] == "_epo") & (ext == ".fif"):
+        eeg = mne.read_epochs(args.filename, preload=True)
+    elif ext == ".set":
+        eeg = mne.read_epochs_eeglab()(args.filename, preload=True)
+    elif ext == ".mat":
+        eeg = mne.read_epochs_fieldtrip(args.filename)
+    elif ext == ".sqd":
+        eeg = mne.read_epochs_kit(args.filename)
+    elif ext == ".eeg":
         eeg = mne.io.read_raw_nihon(args.filename, preload=True)
-    elif ext.lower() == ".fif":
+    elif ext == ".fif":
         eeg = mne.io.read_raw(args.filename, preload=True)
     else:
         eeg = mne.io.read_raw(args.filename, preload=True, encoding="latin1")
 
-    fig = eeg.plot(
-        scalings=dict(eeg=args.scale / 2000000),
-        start=args.start,
-        duration=args.duration,
-        bgcolor=args.bgcolor,
-        highpass=args.highpass,
-        lowpass=args.lowpass,
-        block=True,
-        show=False,
-    )
+    print(eeg.__class__)
+
+    if args.pick is not None:
+        chans = []
+        for ch in eeg.ch_names:
+            if args.pick.lower() in ch.lower():
+                chans.append(ch)
+        if len(chans) == 0:
+            print(f"No channels selected by pick {args.pick}")
+            exit(1)
+        eeg = eeg.pick(chans)
+
+    if args.scale == "auto":
+        scalings = "auto"
+    else:
+        scalings = dict(eeg=args.scale / 2000000)
+
+    #
+    # Plot continuous data
+    #
+    if isinstance(eeg, mne.io.BaseRaw):
+        fig = eeg.plot(
+            scalings=scalings,
+            start=args.start,
+            duration=args.duration,
+            bgcolor=args.bgcolor,
+            highpass=args.highpass,
+            lowpass=args.lowpass,
+            block=True,
+            show=False,
+        )
+
+    #
+    # Plot epoched data
+    #
+    else:
+        fig = eeg.plot(
+            scalings=scalings,
+            n_epochs=args.epochs,
+            block=True,
+            show=False,
+        )
+
     fig.set_figheight(args.height)
     fig.set_figwidth(args.width)
     fig.set_layout_engine("tight")
