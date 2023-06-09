@@ -385,7 +385,6 @@ def main():
     if isinstance(eeg, mne.io.BaseRaw):
         fig = eeg.plot(
             scalings=scalings,
-            picks="all",
             start=args.start,
             duration=args.duration,
             bgcolor=args.bgcolor,
