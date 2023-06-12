@@ -57,10 +57,11 @@ PHYSIOLOGICAL_SIGNALS = {
     "EMG CHIN": "emg",
     "EMG AUX1": "emg",
     "EMG AUX2": "emg",
-    # CARDIAC
+    # Cardiac
     "ECG I": "ecg",
-    "RR": "resp",
     "ECG II": "ecg",
+    # Respiration
+    "RR": "resp",
 }
 
 # # OTHER PHYSIOLOGICAL SIGNALS
