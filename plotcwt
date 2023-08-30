@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+
+import argparse
+from argparse import RawDescriptionHelpFormatter
+import mne
+from os.path import splitext
+import matplotlib.pyplot as plt
+import re
+import sys
+
+# T1/T2 are approximated by FT9/FT10
+MONTAGE = [
+    "Fp1",
+    "Fp2",
+    "F3",
+    "F7",
+    "C3",
+    "T3",
+    "P3",
+    "T5",
+    "O1",
+    "Pz",
+    "Fz",
+    "F4",
+    "F8",
+    "Cz",
+    "C4",
+    "T4",
+    "P4",
+    "T6",  # T6 is now P8
+    "O2",
+    "T7",  # T3 is now T7
+    "P7",  # T5 is now P7
+    "T8",  # T4 is now T8
+]
+
+EQUIVALENT_CHANNELS = {
+    "T6": "P8",
+    "T3": "T7",
+    "T5": "P7",
+    "T4": "T8",
+    "P8": "T6",
+    "T7": "T3",
+    "P7": "T5",
+    "T8": "T4",
+}
+
+
+# https://stackoverflow.com/a/4980181/3048161
+class Regex(object):
+    def __init__(self):
+        self.last_match = None
+
+    def match(self, pattern, text):
+        self.last_match = re.match(pattern, text)
+        return self.last_match
+
+    def search(self, pattern, text):
+        self.last_match = re.search(pattern, text)
+        return self.last_match
+
+
+def fix_channels(eeg, interpolate=False, fix_missing=False):
+    """
+    Standardizes channels and names. Adds a 10-20 montage.
+    Interpolates missing channels. Removes extraneous channels.
+
+    PARAMETERS:
+        eeg - a Raw eeg object
+
+    RETURNS:
+        The repaired eeg object.
+    """
+
+    myre = Regex()
+
+    include = []
+    include_orig_name = []
+    exclude = []
+    ch_name_remap = {}
+    for ch in eeg.ch_names:
+        included = False
+        for chan in MONTAGE:
+            if chan in include:
+                continue
+            if myre.search(rf"[^A-Z]{chan.upper()}[^A-Z]", ch.upper()):
+                include.append(chan)
+                include_orig_name.append(ch)
+                ch_name_remap[ch] = chan
+                included = True
+                break
+            elif myre.search(rf"\b{chan.upper()}[ ]*[-].*\b", ch.upper()):
+                include.append(chan)
+                include_orig_name.append(ch)
+                ch_name_remap[ch] = chan
+                included = True
+                break
+            elif myre.search(rf"(?<!-){chan.upper()}\b", ch.upper()):
+                include.append(chan)
+                include_orig_name.append(ch)
+                ch_name_remap[ch] = chan
+                included = True
+                break
+        if not included:
+            exclude.append(ch)
+
+    include = set(include)
+    exclude = set(exclude)
+
+    keep_ndxs = mne.pick_channels(
+        [x.upper() for x in eeg.ch_names],
+        include=[x.upper() for x in include_orig_name],
+    )
+
+    eeg = eeg.pick(keep_ndxs)
+    mne.rename_channels(eeg.info, ch_name_remap)
+
+    if fix_missing:
+        missing = set(MONTAGE) - set(include)
+        missing = remove_equivalent_channels(missing, include)
+        if len(missing) > 0:
+            if isinstance(eeg, mne.epochs.EpochsFIF):
+                raise Exception(
+                    "fix_channels", "can't create missing channels in epoched data"
+                )
+
+            flatline = np.zeros((len(missing), eeg.n_times))
+            info = mne.create_info(
+                ch_names=missing, sfreq=eeg.info["sfreq"], ch_types="eeg"
+            )
+            chans = mne.io.RawArray(flatline, info)
+            eeg = eeg.add_channels([chans], force_update_info=True)
+            eeg.info["bads"] = missing
+
+    chan_types = dict(zip(eeg.ch_names, ["eeg"] * len(eeg.ch_names)))
+    eeg.set_channel_types(chan_types, verbose=False)
+
+    montage = mne.channels.make_standard_montage(kind="standard_1020", head_size="auto")
+    eeg.set_montage(montage)
+
+    if interpolate:
+        eeg.interpolate_bads()
+
+    exclude = set(exclude) - set(include)
+    # print(f"excluded channels: {exclude}")
+
+    print(ch_name_remap)
+
+    ch_name_unmap = dict([(value, key) for key, value in ch_name_remap.items()])
+
+    return eeg, ch_name_unmap
+
+
+import sys
+from numbers import Number
+from collections import deque
+from collections.abc import Set, Mapping
+
+
+ZERO_DEPTH_BASES = (str, bytes, Number, range, bytearray)
+
+
+def getsize(obj_0):
+    """Recursively iterate to sum size of object & members."""
+    _seen_ids = set()
+
+    def inner(obj):
+        obj_id = id(obj)
+        if obj_id in _seen_ids:
+            return 0
+        _seen_ids.add(obj_id)
+        size = sys.getsizeof(obj)
+        if isinstance(obj, ZERO_DEPTH_BASES):
+            pass  # bypass remaining control flow and return
+        elif isinstance(obj, (tuple, list, Set, deque)):
+            size += sum(inner(i) for i in obj)
+        elif isinstance(obj, Mapping) or hasattr(obj, "items"):
+            size += sum(inner(k) + inner(v) for k, v in getattr(obj, "items")())
+        # Check for custom object instances - may subclass above too
+        if hasattr(obj, "__dict__"):
+            size += inner(vars(obj))
+        if hasattr(obj, "__slots__"):  # can have __slots__ with __dict__
+            size += sum(
+                inner(getattr(obj, s)) for s in obj.__slots__ if hasattr(obj, s)
+            )
+        return size
+
+    return inner(obj_0)
+
+
+def main():
+    # Training settings
+    parser = argparse.ArgumentParser(
+        prog="ploteeg",
+        description="""
+    Plot an eeg file using the mne toolbox.
+
+    Files ending in _epo.fif, .set, .mat, and .sqd are treated as epoched data.
+    Files ending in .eeg are treated as Nihon Kohden data.
+    Files that end in .fif are treated as continuous data.
+    Other file extensions will try to be loaded with the default mne behavior, 
+    with the addition of the 'encoding="latin1"' argument to
+    support extended character sets.
+    """,
+        formatter_class=RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("filename", help="filename to plot")
+    parser.add_argument(
+        "-b", "--bgcolor", default="w", help="background color (for continuous data)"
+    )
+    parser.add_argument("-l", "--lowpass", type=int, default=None)
+    parser.add_argument("-u", "--highpass", type=int, default=None)
+    parser.add_argument(
+        "-o",
+        "--save",
+        help="save a screenshot as filename_start.png, and exit",
+        action="store_true",
+    )
+    parser.add_argument("-s", "--savename", help="filename to save the screenshot as")
+    parser.add_argument(
+        "-x",
+        "--width",
+        type=int,
+        default=20,
+        help="size of the plot in inches (inches, I know)",
+    )
+    parser.add_argument(
+        "-y", "--height", type=int, default=10, help="size of the plot in inches"
+    )
+    parser.add_argument(
+        "-p",
+        "--pick",
+        type=str,
+        default=None,
+        help="channel name filter, e.g. FP matches FP1, FP2, etc. channels",
+    )
+    parser.add_argument(
+        "-f",
+        "--maxfreq",
+        type=int,
+        default=100,
+        help="maximum frequency to plot (i.e. the x-axis)",
+    )
+    parser.add_argument(
+        "-m", "--montage", help="add a standard 10-20 montage", action="store_true"
+    )
+    parser.add_argument(
+        "-d",
+        "--downsample",
+        type=int,
+        default=100,
+        help="downsample the data (default=100Hz), 0 for no resampling",
+    )
+    parser.add_argument(
+        "-i",
+        "--info",
+        help="print information about the file and exit",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--start", type=float, default=None, help="starting time to clip the eeg"
+    )
+    parser.add_argument(
+        "--end", type=float, default=None, help="ending time to clip eeg"
+    )
+    args = parser.parse_args()
+
+    root, ext = splitext(args.filename)
+    ext = ext.lower()
+    if (root[-4:] == "_epo") & (ext == ".fif"):
+        eeg = mne.read_epochs(args.filename, preload=True)
+    elif ext == ".set":
+        eeg = mne.read_epochs_eeglab()(args.filename, preload=True)
+    elif ext == ".mat":
+        eeg = mne.read_epochs_fieldtrip(args.filename)
+    elif ext == ".sqd":
+        eeg = mne.read_epochs_kit(args.filename)
+    elif ext == ".eeg":
+        eeg = mne.io.read_raw_nihon(args.filename, preload=True)
+    elif ext == ".fif":
+        eeg = mne.io.read_raw(args.filename, preload=True)
+    else:
+        eeg = mne.io.read_raw(args.filename, preload=True, encoding="latin1")
+
+    if args.info:
+        print(eeg.info)
+        print(eeg.ch_names)
+        print(getsize(eeg))
+        # for ch in eeg.ch_names:
+        # print(ch)
+        exit(0)
+
+    if args.pick is not None:
+        chans = []
+        for ch in eeg.ch_names:
+            if args.pick.lower() in ch.lower():
+                chans.append(ch)
+        if len(chans) == 0:
+            print(f"No channels selected by pick {args.pick}")
+            exit(1)
+        eeg = eeg.pick(chans)
+
+    if args.montage:
+        eeg, ch_name_unmap = fix_channels(eeg)
+        print(ch_name_unmap)
+        mne.rename_channels(eeg.info, ch_name_unmap)
+
+    if args.downsample > 0:
+        eeg = eeg.resample(args.downsample)
+
+    if args.start is not None:
+        if args.end is None:
+            print("specify --start and --end")
+            exit(1)
+    #
+    # Plot psd
+    #
+    fig = eeg.compute_psd(tmin=args.start, tmax=args.end).plot()
+    #    plt.xlim([0, args.maxfreq])
+    fig.set_figheight(args.height)
+    fig.set_figwidth(args.width)
+    fig.suptitle(sys.argv[1:])
+    fig.set_layout_engine("tight")
+
+    if args.save:
+        if args.savename == None:
+            filename = f"{root}_psd.png"
+        else:
+            filename = args.savename
+        plt.savefig(filename)
+        print(f"Saved {filename}")
+    else:
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
