@@ -10,7 +10,8 @@ from autoreject import Ransac  # noqa
 from autoreject.utils import interpolate_bads  # noqa
 from autoreject import AutoReject, set_matplotlib_defaults  # noqa
 import re
-
+import sys
+import numpy as np
 
 # T1/T2 are approximated by FT9/FT10
 MONTAGE = [
@@ -209,6 +210,43 @@ def fix_channels(eeg, interpolate=False, fix_missing=False):
     return eeg, ch_name_unmap
 
 
+import sys
+from numbers import Number
+from collections import deque
+from collections.abc import Set, Mapping
+
+
+ZERO_DEPTH_BASES = (str, bytes, Number, range, bytearray)
+
+
+def getsize(obj_0):
+    """Recursively iterate to sum size of object & members."""
+    _seen_ids = set()
+
+    def inner(obj):
+        obj_id = id(obj)
+        if obj_id in _seen_ids:
+            return 0
+        _seen_ids.add(obj_id)
+        size = sys.getsizeof(obj)
+        if isinstance(obj, ZERO_DEPTH_BASES):
+            pass  # bypass remaining control flow and return
+        elif isinstance(obj, (tuple, list, Set, deque)):
+            size += sum(inner(i) for i in obj)
+        elif isinstance(obj, Mapping) or hasattr(obj, "items"):
+            size += sum(inner(k) + inner(v) for k, v in getattr(obj, "items")())
+        # Check for custom object instances - may subclass above too
+        if hasattr(obj, "__dict__"):
+            size += inner(vars(obj))
+        if hasattr(obj, "__slots__"):  # can have __slots__ with __dict__
+            size += sum(
+                inner(getattr(obj, s)) for s in obj.__slots__ if hasattr(obj, s)
+            )
+        return size
+
+    return inner(obj_0)
+
+
 def main():
     # Training settings
     parser = argparse.ArgumentParser(
@@ -253,8 +291,8 @@ def main():
     parser.add_argument(
         "-b", "--bgcolor", default="w", help="background color (for continuous data)"
     )
-    parser.add_argument("-l", "--lowpass", type=int, default=None)
-    parser.add_argument("-u", "--highpass", type=int, default=None)
+    parser.add_argument("-l", "--lowpass", type=float, default=None)
+    parser.add_argument("-u", "--highpass", type=float, default=None)
     parser.add_argument(
         "-o",
         "--save",
@@ -276,6 +314,8 @@ def main():
         "-p",
         "--pick",
         type=str,
+        action="append",
+        nargs="+",
         default=None,
         help="channel name filter, e.g. FP matches FP1, FP2, etc. channels",
     )
@@ -317,6 +357,21 @@ def main():
         help="standardize channel names, remove extraneous channels",
         action="store_true",
     )
+    parser.add_argument(
+        "--resample", help="resample to desired sample rate", type=int, default=None
+    )
+    parser.add_argument(
+        "--event", help="select only the event provided", type=str, default=None
+    )
+    parser.add_argument(
+        "--dont_plot", help="don't display the plot", action="store_true"
+    )
+    parser.add_argument(
+        "-i",
+        "--info",
+        help="print information about the file and exit",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     #
@@ -341,11 +396,30 @@ def main():
 
     print(eeg.__class__)
 
+    if args.info:
+        # print(eeg.filename)
+        print(eeg.info)
+        if eeg.info["file_id"] is not None:
+            for file_id in eeg.info["file_id"].items():
+                print(f"file_id: {file_id}")
+        # if eeg.info['meas_id'] is not None:
+        #     for meas_id in eeg.info['meas_id'].items():
+        #         print(f"meas_id: {meas_id}")
+        print(
+            f"times: {np.min(eeg.times)} to {np.max(eeg.times)} in {len(eeg.times)} steps"
+        )
+        print(eeg.ch_names)
+        print(getsize(eeg))
+
+        exit(0)
+
     if args.pick is not None:
+        picks = [item for sublist in args.pick for item in sublist]
         chans = []
-        for ch in eeg.ch_names:
-            if args.pick.lower() in ch.lower():
-                chans.append(ch)
+        for a_pick in picks:
+            for ch in eeg.ch_names:
+                if a_pick.lower() in ch.lower():
+                    chans.append(ch)
         if len(chans) == 0:
             print(f"No channels selected by pick {args.pick}")
             exit(1)
@@ -355,6 +429,12 @@ def main():
         eeg, ch_name_unmap = fix_channels(eeg)
         print(ch_name_unmap)
         mne.rename_channels(eeg.info, ch_name_unmap)
+
+    if (args.highpass is not None) or (args.lowpass is not None):
+        eeg.filter(l_freq=args.lowpass, h_freq=args.highpass, n_jobs=4)
+
+    if args.resample is not None:
+        eeg.resample(args.resample, n_jobs=4)
 
     #
     # TODO perform autoreject on eeg channels
@@ -389,8 +469,6 @@ def main():
             start=args.start,
             duration=args.duration,
             bgcolor=args.bgcolor,
-            highpass=args.highpass,
-            lowpass=args.lowpass,
             block=True,
             show=False,
         )
@@ -401,17 +479,26 @@ def main():
     else:
         print(f"Event types: {eeg.event_id}")
 
-        fig = eeg.plot(
-            scalings=scalings,
-            picks="all",
-            n_epochs=args.epochs,
-            block=True,
-            show=False,
+        id_to_label = {value: key for key, value in eeg.event_id.items()}
+        annotations = mne.annotations_from_events(
+            eeg.events, eeg.info["sfreq"], event_desc=id_to_label
         )
+        eeg.set_annotations(annotations)
 
-    fig.set_figheight(args.height)
-    fig.set_figwidth(args.width)
-    fig.set_layout_engine("tight")
+        if args.event is not None:
+            eeg = eeg[args.event]
+
+        if args.dont_plot == False:
+            fig = eeg.plot(
+                scalings=scalings,
+                picks="all",
+                n_epochs=args.epochs,
+                block=True,
+                show=False,
+            )
+            fig.set_figheight(args.height)
+            fig.set_figwidth(args.width)
+            fig.set_layout_engine("tight")
 
     if args.save:
         if args.savename == None:
