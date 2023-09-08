@@ -291,8 +291,8 @@ def main():
     parser.add_argument(
         "-b", "--bgcolor", default="w", help="background color (for continuous data)"
     )
-    parser.add_argument("-l", "--lowpass", type=float, default=None)
-    parser.add_argument("-u", "--highpass", type=float, default=None)
+    parser.add_argument("-l", "--lowfreq", type=float, default=None)
+    parser.add_argument("-u", "--highfreq", type=float, default=None)
     parser.add_argument(
         "-o",
         "--save",
@@ -372,6 +372,9 @@ def main():
         help="print information about the file and exit",
         action="store_true",
     )
+    parser.add_argument(
+        "--inverse", help="inverse of the signal, e.g. 1/x", action="store_true"
+    )
     args = parser.parse_args()
 
     #
@@ -391,8 +394,13 @@ def main():
         eeg = mne.io.read_raw_nihon(args.filename, preload=True)
     elif ext == ".fif":
         eeg = mne.io.read_raw(args.filename, preload=True)
+    elif ext == ".dat":
+        eeg = mne.io.read_raw_eximia(args.filename, preload=True)
     else:
-        eeg = mne.io.read_raw(args.filename, preload=True, encoding="latin1")
+        try:
+            eeg = mne.io.read_raw(args.filename, preload=True, encoding="latin1")
+        except:
+            eeg = mne.io.read_raw(args.filename, preload=True)
 
     print(eeg.__class__)
 
@@ -408,8 +416,21 @@ def main():
         print(
             f"times: {np.min(eeg.times)} to {np.max(eeg.times)} in {len(eeg.times)} steps"
         )
+
+        # Extract channel types
+        channel_types = [ch["coil_type"] for ch in eeg.info["chs"]]
+
+        # Convert to unique set
+        unique_channel_types = set(channel_types)
+        unique_channel_types_str = set(
+            mne.io.pick.channel_type(eeg.info, idx) for idx in range(len(eeg.ch_names))
+        )
+
+        for ch_type in unique_channel_types_str:
+            data = eeg.get_data(picks=[ch_type])
+            print(f"{ch_type} data range: {np.min(data)} to {np.max(data)}")
         print(eeg.ch_names)
-        print(getsize(eeg))
+        print(f"Size in bytes: {getsize(eeg)}")
 
         exit(0)
 
@@ -430,8 +451,8 @@ def main():
         print(ch_name_unmap)
         mne.rename_channels(eeg.info, ch_name_unmap)
 
-    if (args.highpass is not None) or (args.lowpass is not None):
-        eeg.filter(l_freq=args.lowpass, h_freq=args.highpass, n_jobs=4)
+    if (args.highfreq is not None) or (args.lowfreq is not None):
+        eeg.filter(l_freq=args.lowfreq, h_freq=args.highfreq, n_jobs=4)
 
     if args.resample is not None:
         eeg.resample(args.resample, n_jobs=4)
@@ -452,13 +473,17 @@ def main():
     elif args.scale == "auto":
         scalings = "auto"
     else:
-        scalings = dict(eeg=args.scale / 2000000, ecg=2e10, emg=2e10)
+        scalings = dict(eeg=float(args.scale) / 2000000, ecg=2e10, emg=2e10)
 
     if args.average:
         eeg = eeg.set_eeg_reference(ref_channels="average")
 
     if args.reject is not None:
         eeg.drop_bad(reject=dict(eeg=args.reject / 1000000))
+
+    if args.inverse:
+        epsilon = 1e-9
+        eeg._data = 1 / (eeg._data + epsilon)
 
     #
     # Plot continuous data
