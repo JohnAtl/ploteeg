@@ -385,7 +385,10 @@ def main():
     if (root[-4:] == "_epo") & (ext == ".fif"):
         eeg = mne.read_epochs(args.filename, preload=True)
     elif ext == ".set":
-        eeg = mne.read_epochs_eeglab()(args.filename, preload=True)
+        try:
+            eeg = mne.read_epochs_eeglab(args.filename)
+        except:
+            eeg = mne.io.read_raw_eeglab(args.filename)
     elif ext == ".mat":
         eeg = mne.read_epochs_fieldtrip(args.filename)
     elif ext == ".sqd":
