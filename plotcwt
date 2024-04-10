@@ -263,6 +263,18 @@ def main():
     parser.add_argument(
         "--end", type=float, default=None, help="ending time to clip eeg"
     )
+    parser.add_argument(
+        "--band-stop-center",
+        type=float,
+        default=None,
+        help="center frequency in Hz for band-stop filter",
+    )
+    parser.add_argument(
+        "--band-stop-width",
+        type=float,
+        default=None,
+        help="width of the band-stop filter in Hz",
+    )
     args = parser.parse_args()
 
     root, ext = splitext(args.filename)
@@ -270,7 +282,10 @@ def main():
     if (root[-4:] == "_epo") & (ext == ".fif"):
         eeg = mne.read_epochs(args.filename, preload=True)
     elif ext == ".set":
-        eeg = mne.read_epochs_eeglab()(args.filename, preload=True)
+        try:
+            eeg = mne.read_epochs_eeglab(args.filename)
+        except:
+            eeg = mne.io.read_raw_eeglab(args.filename)
     elif ext == ".mat":
         eeg = mne.read_epochs_fieldtrip(args.filename)
     elif ext == ".sqd":
@@ -312,8 +327,12 @@ def main():
         if args.end is None:
             print("specify --start and --end")
             exit(1)
+
+    if args.band_stop_center is not None:
+        eeg = eeg.notch_filter(args.band_stop_center, notch_widths=args.band_stop_width)
+
     #
-    # Plot psd
+    # Plot cwt
     #
     fig = eeg.compute_psd(tmin=args.start, tmax=args.end).plot()
     #    plt.xlim([0, args.maxfreq])
@@ -324,7 +343,7 @@ def main():
 
     if args.save:
         if args.savename == None:
-            filename = f"{root}_psd.png"
+            filename = f"{root}_cwt.png"
         else:
             filename = args.savename
         plt.savefig(filename)

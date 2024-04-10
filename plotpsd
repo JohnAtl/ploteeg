@@ -248,8 +248,8 @@ def main():
         "-d",
         "--downsample",
         type=int,
-        default=100,
-        help="downsample the data (default=100Hz), 0 for no resampling",
+        default=None,
+        help="downsample the data (default=None for no resampling)",
     )
     parser.add_argument(
         "-i",
@@ -320,7 +320,7 @@ def main():
         print(ch_name_unmap)
         mne.rename_channels(eeg.info, ch_name_unmap)
 
-    if args.downsample > 0:
+    if args.downsample is not None:
         eeg = eeg.resample(args.downsample)
 
     if args.start is not None:

@@ -4,14 +4,22 @@ import argparse
 from argparse import RawDescriptionHelpFormatter
 import mne
 from os.path import splitext
+import os
 import matplotlib.pyplot as plt
+import edfio
+import tempfile
 
-from autoreject import Ransac  # noqa
-from autoreject.utils import interpolate_bads  # noqa
-from autoreject import AutoReject, set_matplotlib_defaults  # noqa
+try:
+    from autoreject import Ransac  # noqa
+    from autoreject.utils import interpolate_bads  # noqa
+    from autoreject import AutoReject, set_matplotlib_defaults  # noqa
+except:
+    pass
+
 import re
 import sys
 import numpy as np
+import xml.etree.ElementTree as ET
 
 # T1/T2 are approximated by FT9/FT10
 MONTAGE = [
@@ -87,6 +95,131 @@ PHYSIOLOGICAL_SIGNALS = {
 # "PRESSCHECK": "resp",
 # "ECG IIHF": "resp",
 # "TECHNICAL": "syst",
+
+SLEEP_MONTAGE = [
+    "F3",
+    "F4",
+    "C3",
+    "C4",
+    "O1",
+    "O2",
+    "EOG ROC-A2",
+    "EOG LOC-A2",
+    "EMG CHIN",
+]
+
+
+def _get_default_channels_re():
+    channels = SLEEP_MONTAGE
+    channels_re = "|".join([f"\\b{s}\\b" for s in channels])
+    return channels_re
+
+
+def read_edf(edf_filename: str, picks_re=None) -> mne.io.Raw:
+    if picks_re is None:
+        channels_re = _get_default_channels_re()
+    else:
+        channels_re = picks_re
+
+    edf = edfio.read_edf(str(edf_filename))
+    for signal in edf.signals:
+        if re.search(channels_re, signal.label.upper()) is None:
+            try:
+                edf.drop_signals(signal.label)
+            except ValueError:
+                pass  # just a duplicate signal
+            except Exception:
+                raise
+
+    _, temp_filename = tempfile.mkstemp()
+    temp_filename += ".edf"
+    edf.write(temp_filename)
+    new_edf = mne.io.read_raw(temp_filename, encoding="latin1", preload=True)
+    os.remove(temp_filename)
+    return new_edf
+
+
+def label_eeg_using_rml(
+    eeg_filename, rml_filename, save_filename=None, overwrite=False
+):
+    tree = ET.parse(rml_filename)
+    root = tree.getroot()
+    try:
+        if args.all_chans:
+            eeg = mne.io.read_raw(eeg_filename, encoding="latin1", preload=True)
+        else:
+            eeg = read_edf(eeg_filename)
+    except:
+        print("Falling back to mne.io.read_raw")
+        eeg = mne.io.read_raw(eeg_filename, preload=True)
+
+    ns = {"ps": "http://www.respironics.com/PatientStudy.xsd"}
+
+    print("Finding stage events")
+    # Traverse the tree extracting sleep stage data
+    onsets = []
+    durations = []
+    descriptions = []
+    for x in root.findall(
+        "{http://www.respironics.com/PatientStudy.xsd}ScoringData",
+    ):
+        stagingdata = x.find("{http://www.respironics.com/PatientStudy.xsd}StagingData")
+        userstaging = stagingdata.find(
+            "{http://www.respironics.com/PatientStudy.xsd}UserStaging"
+        )
+        staging = userstaging.find(
+            "{http://www.respironics.com/PatientStudy.xsd}NeuroAdultAASMStaging"
+        )
+        last_start = -1
+        for stage in staging.findall(
+            "{http://www.respironics.com/PatientStudy.xsd}Stage"
+        ):
+            # print(stage.attrib["Type"],stage.attrib["Start"])
+            start = int(stage.attrib["Start"])
+            onsets.append(start)
+            descriptions.append(stage.attrib["Type"])
+            if last_start >= 0:
+                durations.append(start - last_start)
+            last_start = start
+    durations.append(max(eeg.times))
+
+    print("Finding ChannelFail events")
+    # Traverse the tree extracting times marked as bad (i.e. ChannelFail)
+    events = x.find("{http://www.respironics.com/PatientStudy.xsd}Events")
+    for event in events.findall("{http://www.respironics.com/PatientStudy.xsd}Event"):
+        if event.attrib["Type"] == "ChannelFail":
+            channel = event.findall(
+                "{http://www.respironics.com/PatientStudy.xsd}ChannelFail"
+            )
+            if int(channel[0].attrib["EdfSignal"]) <= 8:
+                start = int(float(event.attrib["Start"]))
+                duration = int(float(event.attrib["Duration"]))
+                description = "bad channel"
+                onsets.append(start)
+                durations.append(duration)
+                descriptions.append(description)
+
+    print("Finding Arousals")
+    events = tree.findall(".//ps:Event", namespaces=ns)
+    for element in events:
+        if element.attrib["Type"] in ["Arousal"]:
+            onsets.append(element.attrib["Start"])
+            durations.append(element.attrib["Duration"])
+            descriptions.append("Arousal")
+
+    print("Annotating eeg")
+    # onsets, durations, descriptions = contiguous_onset_duration(
+    #     onsets, durations, descriptions
+    # )
+    # Create annotations from the above labels, add to a copy of the eeg
+    annot = mne.Annotations(onset=onsets, duration=durations, description=descriptions)
+    annot_eeg = eeg.copy()
+    annot_eeg.set_annotations(annot)
+
+    if save_filename is not None:
+        annot_eeg.save(save_filename, overwrite=overwrite)
+
+    return annot_eeg
 
 
 # https://stackoverflow.com/a/4980181/3048161
@@ -248,6 +381,7 @@ def getsize(obj_0):
 
 
 def main():
+    global args
     # Training settings
     parser = argparse.ArgumentParser(
         prog="ploteeg",
@@ -375,6 +509,19 @@ def main():
     parser.add_argument(
         "--inverse", help="inverse of the signal, e.g. 1/x", action="store_true"
     )
+    parser.add_argument(
+        "--exclude",
+        type=str,
+        action="append",
+        nargs="+",
+        default=None,
+        help="channel(s) to exclude",
+    )
+    parser.add_argument(
+        "--all-chans",
+        help="display all channels using mne.io.Raw reader (slow)",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     #
@@ -399,10 +546,18 @@ def main():
         eeg = mne.io.read_raw(args.filename, preload=True)
     elif ext == ".dat":
         eeg = mne.io.read_raw_eximia(args.filename, preload=True)
+    elif ext == ".rml":
+        filename, ext = splitext(args.filename)
+        eeg_filename = filename + "[001].edf"
+        eeg = label_eeg_using_rml(eeg_filename=eeg_filename, rml_filename=args.filename)
     else:
         try:
-            eeg = mne.io.read_raw(args.filename, preload=True, encoding="latin1")
+            if args.all_chans:
+                eeg = mne.io.read_raw(args.filename, encoding="latin1", preload=True)
+            else:
+                eeg = read_edf(args.filename)
         except:
+            print("Falling back to mne.io.read_raw")
             eeg = mne.io.read_raw(args.filename, preload=True)
 
     print(eeg.__class__)
@@ -437,22 +592,22 @@ def main():
 
         exit(0)
 
-    if args.pick is not None:
-        picks = [item for sublist in args.pick for item in sublist]
-        chans = []
-        for a_pick in picks:
-            for ch in eeg.ch_names:
-                if a_pick.lower() in ch.lower():
-                    chans.append(ch)
-        if len(chans) == 0:
-            print(f"No channels selected by pick {args.pick}")
-            exit(1)
-        eeg = eeg.pick(chans)
-
     if args.fixchannels or args.montage:
         eeg, ch_name_unmap = fix_channels(eeg)
         print(ch_name_unmap)
-        mne.rename_channels(eeg.info, ch_name_unmap)
+        # mne.rename_channels(eeg.info, ch_name_unmap)
+
+    if args.exclude is not None:
+        excludes = [item for sublist in args.exclude for item in sublist]
+        eeg = eeg.pick(picks=None, exclude=excludes)
+
+    if args.pick is not None:
+        picks = [item for sublist in args.pick for item in sublist]
+
+        try:
+            eeg = eeg.pick(picks=picks)
+        except:
+            print(eeg.info)
 
     if (args.highfreq is not None) or (args.lowfreq is not None):
         eeg.filter(l_freq=args.lowfreq, h_freq=args.highfreq, n_jobs=4)
@@ -523,6 +678,8 @@ def main():
                 n_epochs=args.epochs,
                 block=True,
                 show=False,
+                events=args.resample
+                is None,  # if resampled, events will not coincide with new timeline
             )
             fig.set_figheight(args.height)
             fig.set_figwidth(args.width)
