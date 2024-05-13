@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 
 import argparse
-from argparse import RawDescriptionHelpFormatter
-import mne
-from os.path import splitext
-import matplotlib.pyplot as plt
 import re
 import sys
+from argparse import RawDescriptionHelpFormatter
+from os.path import splitext, basename
+
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import mne
+import numpy as np
+from mne.time_frequency import AverageTFR, tfr_array_morlet
 
 # T1/T2 are approximated by FT9/FT10
 MONTAGE = [
@@ -152,10 +156,13 @@ def fix_channels(eeg, interpolate=False, fix_missing=False):
 
 
 import sys
-from numbers import Number
 from collections import deque
-from collections.abc import Set, Mapping
+from collections.abc import Mapping, Set
+from numbers import Number
 
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.signal import stft
 
 ZERO_DEPTH_BASES = (str, bytes, Number, range, bytearray)
 
@@ -188,19 +195,42 @@ def getsize(obj_0):
     return inner(obj_0)
 
 
+def calculate_power_over_time(
+    eeg_data, fs, freq_range=(12, 17), nperseg=512, noverlap=384
+):
+    """
+    Calculate power over time of an EEG channel in a specific frequency range.
+
+    Parameters:
+    - eeg_data: np.array, EEG channel data
+    - fs: int or float, sampling frequency in Hz
+    - freq_range: tuple, frequency range to analyze (start, end) in Hz
+
+    Returns:
+    - time: np.array, time axis for the power data
+    - power: np.array, power over time within the specified frequency band
+    """
+
+    eeg_data = np.reshape(eeg_data, -1)
+
+    # Perform Short-Time Fourier Transform
+    f, t, Zxx = stft(eeg_data, fs=fs, window="hann", nperseg=nperseg, noverlap=noverlap)
+
+    # Find indices corresponding to the frequency range
+    freq_inds = (f >= freq_range[0]) & (f <= freq_range[1])
+
+    # Calculate power in the band
+    power = np.sum(np.abs(Zxx[freq_inds, :]) ** 2, axis=0)
+
+    return t, power
+
+
 def main():
     # Training settings
     parser = argparse.ArgumentParser(
-        prog="ploteeg",
+        prog="plottfr",
         description="""
-    Plot an eeg file using the mne toolbox.
-
-    Files ending in _epo.fif, .set, .mat, and .sqd are treated as epoched data.
-    Files ending in .eeg are treated as Nihon Kohden data.
-    Files that end in .fif are treated as continuous data.
-    Other file extensions will try to be loaded with the default mne behavior, 
-    with the addition of the 'encoding="latin1"' argument to
-    support extended character sets.
+    Plot time-frequency representation
     """,
         formatter_class=RawDescriptionHelpFormatter,
     )
@@ -242,26 +272,14 @@ def main():
         help="maximum frequency to plot (i.e. the x-axis)",
     )
     parser.add_argument(
-        "--ymin",
-        type=int,
-        default=-60,
-        help="minimum power for the y axis",
-    )
-    parser.add_argument(
-        "--ymax",
-        type=int,
-        default=40,
-        help="maximum power for the y axis",
-    )
-    parser.add_argument(
         "-m", "--montage", help="add a standard 10-20 montage", action="store_true"
     )
     parser.add_argument(
         "-d",
         "--downsample",
         type=int,
-        default=None,
-        help="downsample the data (default=None for no resampling)",
+        default=100,
+        help="downsample the data (default=100Hz), 0 for no resampling",
     )
     parser.add_argument(
         "-i",
@@ -320,7 +338,7 @@ def main():
     if args.pick is not None:
         chans = []
         for ch in eeg.ch_names:
-            if args.pick.lower() in ch.lower():
+            if args.pick.lower() == ch.lower():
                 chans.append(ch)
         if len(chans) == 0:
             print(f"No channels selected by pick {args.pick}")
@@ -332,7 +350,7 @@ def main():
         print(ch_name_unmap)
         mne.rename_channels(eeg.info, ch_name_unmap)
 
-    if args.downsample is not None:
+    if args.downsample > 0:
         eeg = eeg.resample(args.downsample)
 
     if args.start is not None:
@@ -342,28 +360,63 @@ def main():
 
     if args.band_stop_center is not None:
         eeg = eeg.notch_filter(args.band_stop_center, notch_widths=args.band_stop_width)
-    #
-    # Plot psd
-    #
-    fig = eeg.compute_psd(tmin=args.start, tmax=args.end).plot()
-    axes = fig.get_axes()
-    print(f"{len(axes)=}")
-    axes[0].set_xlim([0, args.maxfreq])
-    axes[0].set_ylim([args.ymin, args.ymax])
-    fig.set_figheight(args.height)
-    fig.set_figwidth(args.width)
-    fig.suptitle(sys.argv[1:])
-    fig.set_layout_engine("tight")
 
-    if args.save:
-        if args.savename == None:
-            filename = f"{root}_psd.png"
-        else:
-            filename = args.savename
-        plt.savefig(filename)
-        print(f"Saved {filename}")
-    else:
-        plt.show()
+    #
+    # Plot tfr
+    #
+    freqs = np.arange(3, 30, 1)
+    # n_cycles = freqs / 4
+    fs = int(eeg.info["sfreq"])
+    tfr = eeg.compute_tfr(
+        "morlet",
+        freqs=freqs,
+        tmin=args.start,
+        tmax=args.end,
+        #   n_cycles=n_cycles
+    )
+    fig = plt.figure(figsize=(10, 8))
+    gs = gridspec.GridSpec(3, 1, figure=fig)
+    ax1 = fig.add_subplot(gs[0:2])
+    ax2 = fig.add_subplot(gs[2])
+
+    tfr.plot(show=False, axes=ax1)
+
+    eeg_data = eeg.get_data()[:, int(args.start * fs) : int(args.end * fs)]
+    t, power = calculate_power_over_time(eeg_data, fs, nperseg=100, noverlap=50)
+    # ax = fig.add_subplot(3, 1, 3)
+    ax2.plot(t + args.start, power)
+
+    pos1 = ax1.get_position()
+    pos2 = ax2.get_position()
+    ax2.set_position([pos1.x0, pos2.y0, pos1.width, pos2.height])
+    ax2.set_xlim(args.start, args.end)
+    ax2.set_ylabel("Power (µV²)")
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylim(0, 1.5e-10)
+    fig.suptitle(f"{basename(args.filename)}\n{args.pick}")
+    fig.set_size_inches(10, 8)
+    fig.canvas.draw()
+
+    fig.savefig("file.png")
+
+    print(f"{fs=}")
+
+    # power = eeg.compute_tfr(tmin=args.start, tmax=args.end,)
+    # #    plt.xlim([0, args.maxfreq])
+    # fig.set_figheight(args.height)
+    # fig.set_figwidth(args.width)
+    # fig.suptitle(sys.argv[1:])
+    # fig.set_layout_engine("tight")
+
+    # if args.save:
+    #     if args.savename == None:
+    #         filename = f"{root}_cwt.png"
+    #     else:
+    #         filename = args.savename
+    #     plt.savefig(filename)
+    #     print(f"Saved {filename}")
+    # else:
+    #     plt.show()
 
 
 if __name__ == "__main__":
