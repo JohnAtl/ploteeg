@@ -5,6 +5,7 @@ import re
 import sys
 from argparse import RawDescriptionHelpFormatter
 from os.path import splitext, basename
+from scipy.signal import hilbert
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -305,6 +306,11 @@ def main():
         default=None,
         help="width of the band-stop filter in Hz",
     )
+    parser.add_argument(
+        "--hilbert",
+        help="plot the hilbert transform, rather than the stft",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     root, ext = splitext(args.filename)
@@ -382,9 +388,15 @@ def main():
     tfr.plot(show=False, axes=ax1)
 
     eeg_data = eeg.get_data()[:, int(args.start * fs) : int(args.end * fs)]
-    t, power = calculate_power_over_time(eeg_data, fs, nperseg=100, noverlap=50)
-    # ax = fig.add_subplot(3, 1, 3)
-    ax2.plot(t + args.start, power)
+    eeg_data = np.reshape(eeg_data, -1)
+
+    if args.hilbert:
+        t = np.arange(args.start, args.end, 1 / fs)
+        power = np.abs(hilbert(eeg_data))
+    else:
+        t, power = calculate_power_over_time(eeg_data, fs, nperseg=100, noverlap=50)
+        t += args.start
+    ax2.plot(t, power)
 
     pos1 = ax1.get_position()
     pos2 = ax2.get_position()
@@ -392,7 +404,8 @@ def main():
     ax2.set_xlim(args.start, args.end)
     ax2.set_ylabel("Power (µV²)")
     ax2.set_xlabel("Time (s)")
-    ax2.set_ylim(0, 1.5e-10)
+    if not args.hilbert:
+        ax2.set_ylim(0, 1.5e-10)
     fig.suptitle(f"{basename(args.filename)}\n{args.pick}")
     fig.set_size_inches(10, 8)
     fig.canvas.draw()
