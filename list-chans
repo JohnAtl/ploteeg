@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+
+import sys
+from os.path import splitext, basename
+import mne
+
+from lxml import etree
+from lxml.etree import _Element
+import re
+
+
+def get_eeg_filename_from_xml_filename(xml_filename: str) -> str:
+    """
+    Given an XML filename, returns the corresponding EEG filename
+    with a '[001].edf' suffix.
+    """
+    filepath, ext = splitext(xml_filename)
+    if ext == ".rml":
+        extension = "[001].edf"
+    else:
+        extension = ".edf"
+    return filepath + extension
+
+
+def get_xml_filename_from_eeg_filename(eeg_filename: str, ext=".xml") -> str:
+    head, _ = split(eeg_filename)
+    base_filename, ext = get_base_filename(eeg_filename)
+    return join(head, base_filename + ext)
+
+
+def get_base_filename(filename: str) -> str:
+    """
+    Returns the base filename with path, extension, and suffixes
+    peculiar to eeg files removed.
+    """
+
+    path, _ = splitext(str(filename))
+    trimmed = basename(path)
+    if re.match(r"\[001\]", filename) is not None:
+        ext = ".rml"
+    else:
+        ext = ".xml"
+    trimmed = re.sub(r"\[001\]", "", trimmed)
+    return trimmed, ext
+
+
+def process_file(filename):
+    """
+    Process a single EDF file, classify its sleep stages, apply audits, and write results to an XML file.
+
+    Args:
+        filename (str): The filename of the EDF file to process.
+    """
+
+    path, ext = splitext(filename)
+    if ext == ".rml" or ext == ".xml":
+        eeg_filename = get_eeg_filename_from_xml_filename(filename)
+        xml_filename = filename
+    else:
+        eeg_filename = filename
+        xml_filename = get_xml_filename_from_eeg_filename(filename)
+
+    ns = {"ns": "http://www.respironics.com/PatientStudy.xsd"}
+    tree = etree.parse(xml_filename)
+    root = tree.getroot()
+    xml_chan_map = {}
+    for channel in tree.xpath(
+        "//ns:ChannelConfig/ns:Channels/ns:Channel", namespaces=ns
+    ):
+        label = channel.find("ns:Label", namespaces=ns).text
+        edf_signal_num = int(channel.get("EdfSignal"))
+        xml_chan_map[edf_signal_num] = label
+
+    eeg_chan_map = {}
+    eeg = mne.io.read_raw(eeg_filename)
+    for ndx, ch in enumerate(eeg.ch_names):
+        eeg_chan_map[ndx] = ch
+
+    all_keys = set(xml_chan_map.keys()).union(set(eeg_chan_map.keys()))
+    print("Chan#  XML Name   EEG Name")
+    print("-----  ---------- ----------")
+    for key in all_keys:
+        xml_chan = xml_chan_map.get(key, None)
+        eeg_chan = eeg_chan_map.get(key, None)
+        print(f"{key:5d}: {xml_chan:10s} {eeg_chan:10s}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: list-chans <edf filename>")
+        sys.exit(1)
+    the_filename = sys.argv[1]
+    process_file(the_filename)

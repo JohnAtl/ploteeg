@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import re
 import sys
+import tempfile
 from argparse import RawDescriptionHelpFormatter
-from os.path import splitext, basename
-from scipy.signal import hilbert
+from os.path import basename, splitext
 
-import matplotlib.pyplot as plt
+import edfio
 import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
 import mne
 import numpy as np
 from mne.time_frequency import AverageTFR, tfr_array_morlet
+from scipy.signal import hilbert
 
 # T1/T2 are approximated by FT9/FT10
 MONTAGE = [
@@ -49,6 +52,249 @@ EQUIVALENT_CHANNELS = {
     "P7": "T5",
     "T8": "T4",
 }
+
+PHYSIOLOGICAL_SIGNALS = {
+    # EOG
+    "EOG LOC-A2": "eog",
+    "EOG ROC-A2": "eog",
+    # EMG
+    "EMG CHIN": "emg",
+    "EMG AUX1": "emg",
+    "EMG AUX2": "emg",
+    # Cardiac
+    "ECG I": "ecg",
+    "ECG II": "ecg",
+    # Respiration
+    "RR": "resp",
+}
+
+# # OTHER PHYSIOLOGICAL SIGNALS
+# "FLOW PATIENT-0": "resp",
+# "FLOW PATIENT-1": "resp",
+# "FLOW PATIENT-2": "resp",
+# "EFFORT THO": "resp",
+# "EFFORT ABD": "resp",
+# "SNORE-0": "resp",
+# "SNORE-1": "resp",
+# "SPO2": "resp",
+# "PLETH": "resp",
+# "PULSERATE": "bio",
+# "LEG 2": "emg",
+# "LEG 1": "emg",
+# "BODY": "misc",
+# "XPAP CPAP": "resp",
+# "XPAP IPAP": "resp",
+# "XPAP EPAP": "resp",
+# "LEAK TOTAL": "resp",
+# "TIDVOL EXHALED": "resp",
+# "PRESSCHECK": "resp",
+# "ECG IIHF": "resp",
+# "TECHNICAL": "syst",
+
+SLEEP_MONTAGE = [
+    "F3",
+    "F4",
+    "C3",
+    "C4",
+    "O1",
+    "O2",
+    "ROC",
+    "LOC",
+    "CHIN",
+    "ECG I",
+    "ECG II",
+    "SPO2",
+    "RR",
+    "PLETH",
+    "BODY",
+    "LEG 1",
+    "LEG 2",
+]
+
+
+STANDARDIZE_CHANNELS = {
+    "EEG F3-A2": "F3",
+    "EEG F4-A1": "F4",
+    "EEG C3-A2": "C3",
+    "EEG C4-A1": "C4",
+    "EEG O1-A2": "O1",
+    "EEG O2-A1": "O2",
+    "EMG CHIN": "CHIN",
+    "EOG.*L": "LOC",
+    "EOG.*R": "ROC",
+    "EKG": "ECG I",
+    "\bEMG\b": "CHIN",
+}
+
+EEG_SIGNALS = [
+    "Fp1",
+    "Fp2",
+    "F3",
+    "F7",
+    "C3",
+    "T3",
+    "P3",
+    "T5",
+    "O1",
+    "Pz",
+    "Fz",
+    "F4",
+    "F8",
+    "Cz",
+    "C4",
+    "T4",
+    "P4",
+    "T6",  # T6 is now P8
+    "O2",
+    "T7",  # T3 is now T7
+    "P7",  # T5 is now P7
+    "T8",  # T4 is now T8
+]
+
+MONTAGE = EEG_SIGNALS
+
+EQUIVALENT_CHANNELS = {
+    "T6": "P8",
+    "T3": "T7",
+    "T5": "P7",
+    "T4": "T8",
+    "P8": "T6",
+    "T7": "T3",
+    "P7": "T5",
+    "T8": "T4",
+}
+
+PHYSIOLOGICAL_SIGNALS = {
+    # EOG
+    "LOC": "eog",
+    "ROC": "eog",
+    # EMG
+    "CHIN": "emg",
+    "EMG AUX1": "emg",
+    "EMG AUX2": "emg",
+    "LEG 1": "emg",
+    # Cardiac
+    "ECG I": "ecg",
+    "ECG II": "ecg",
+    "HR": "ecg",
+    # Respiration
+    "RR": "resp",
+    "PLETH": "resp",
+    "FLOW": "resp",
+    "SNORE": "resp",
+    "THOR": "resp",
+    "ABDO": "resp",
+    "SPO2": "resp",
+    # Misc
+    "BODY": "misc",
+}
+
+FS = 100
+
+
+def standardize_channel_name(name):
+
+    myre = Regex()
+    new_name = name.upper()
+    for name_re, st_name in STANDARDIZE_CHANNELS.items():
+        if myre.search(name_re, name.upper()):
+            new_name = st_name
+            break
+    return new_name
+
+
+def standardize_channel_name_order(ch_names, montage=None):
+    if montage is None:
+        montage = SLEEP_MONTAGE
+
+    names_in_order = []
+    others = []
+    for name in montage:
+        if name in ch_names:
+            names_in_order.append(name)
+    for name in ch_names:
+        if name not in names_in_order:
+            others.append(name)
+    others = list(np.sort(others))
+    return names_in_order + others
+
+
+def _get_default_channels_re():
+    channels = SLEEP_MONTAGE
+    channels_re = "|".join([f"\\b{s}\\b" for s in channels])
+    return channels_re
+
+
+def read_edf(
+    edf_filename: str,
+    picks_re=None,
+    invert_ecg=False,
+    resample_fs=None,
+) -> mne.io.Raw:
+    if picks_re is None:
+        channels_re = _get_default_channels_re()
+    else:
+        channels_re = picks_re
+
+    print(f"{channels_re=}")
+
+    if resample_fs is None:
+        resample_fs = FS
+
+    edf = edfio.read_edf(str(edf_filename))
+    for signal in edf.signals:
+        st_chan_name = standardize_channel_name(signal.label)
+        print(f"Checking channel {st_chan_name}")
+        if picks_re == "all" or re.search(channels_re, st_chan_name):
+            print(f"Picked channel {st_chan_name}")
+            signal.label = st_chan_name
+            if signal.label == "ECG I" and invert_ecg:
+                the_data = signal.data
+                signal.update_data(-the_data)
+        else:
+            try:
+                edf.drop_signals(signal.label)
+                print(f"Dropped channel {signal.label=}/{st_chan_name=}")
+            except ValueError:
+                pass  # just a duplicate signal
+            except Exception:
+                raise
+            continue
+
+        if signal.sampling_frequency != resample_fs:
+            resample_ratio = resample_fs / signal.sampling_frequency
+            resampled_signal = mne.filter.resample(
+                signal.data, up=resample_ratio, down=1
+            )
+            signal.update_data(data=resampled_signal, sampling_frequency=resample_fs)
+
+    if len(edf.signals) == 0:
+        print("Error: All channels were dropped")
+        sys.exit(1)
+
+    _, temp_filename = tempfile.mkstemp(prefix=basename(edf_filename), suffix=".edf")
+    edf.write(temp_filename)
+    try:
+        new_edf = mne.io.read_raw(temp_filename, encoding="latin1", preload=True)
+    except IndexError as e:
+        print(e)
+        sys.exit(1)
+
+    os.remove(temp_filename)
+
+    eeg_channels = set(EEG_SIGNALS).intersection(set(new_edf.ch_names))
+    chan_types = dict(zip(eeg_channels, ["eeg"] * len(eeg_channels)))
+    new_edf.set_channel_types(chan_types, verbose=False)
+    phys_channels = set(PHYSIOLOGICAL_SIGNALS).intersection(set(new_edf.ch_names))
+    phys_chan_types = {}
+    for chan in phys_channels:
+        phys_chan_types[chan] = PHYSIOLOGICAL_SIGNALS[chan]
+    new_edf.set_channel_types(phys_chan_types)
+
+    standard_channel_name_order = standardize_channel_name_order(new_edf.ch_names)
+    new_edf = new_edf.reorder_channels(standard_channel_name_order)
+
+    return new_edf
 
 
 # https://stackoverflow.com/a/4980181/3048161
@@ -313,6 +559,20 @@ def main():
     )
     args = parser.parse_args()
 
+    picks = None
+    if args.pick is not None:
+        if args.pick == ["all"]:
+            picks = "all"
+        else:
+            if isinstance(args.pick, str):
+                picks = args.pick
+            else:
+                picks = "|".join([f"\\b{s}\\b" for s in args.pick])
+        print(f"{args.pick=}, {picks=}")
+
+    #
+    # L O A D   T H E   E E G   F I L E
+    #
     root, ext = splitext(args.filename)
     ext = ext.lower()
     if (root[-4:] == "_epo") & (ext == ".fif"):
@@ -330,8 +590,25 @@ def main():
         eeg = mne.io.read_raw_nihon(args.filename, preload=True)
     elif ext == ".fif":
         eeg = mne.io.read_raw(args.filename, preload=True)
+    elif ext == ".dat":
+        eeg = mne.io.read_raw_eximia(args.filename, preload=True)
+    elif ext == ".rml":
+        filename, ext = splitext(args.filename)
+        eeg_filename = filename + "[001].edf"
+        eeg = label_eeg_using_rml(
+            eeg_filename=eeg_filename,
+            rml_filename=args.filename,
+            picks_re=picks,
+            include_channel_fails=args.include_channel_fails,
+            include_apneas=args.include_apneas,
+        )
     else:
-        eeg = mne.io.read_raw(args.filename, preload=True, encoding="latin1")
+        try:
+            eeg = read_edf(args.filename, picks_re=picks)
+        except Exception as e:
+            raise e
+            print("Falling back to mne.io.read_raw")
+            eeg = mne.io.read_raw(args.filename, preload=True)
 
     if args.info:
         print(eeg.info)
@@ -341,15 +618,15 @@ def main():
         # print(ch)
         exit(0)
 
-    if args.pick is not None:
-        chans = []
-        for ch in eeg.ch_names:
-            if args.pick.lower() == ch.lower():
-                chans.append(ch)
-        if len(chans) == 0:
-            print(f"No channels selected by pick {args.pick}")
-            exit(1)
-        eeg = eeg.pick(chans)
+    # if args.pick is not None:
+    #     chans = []
+    #     for ch in eeg.ch_names:
+    #         if args.pick.lower() == ch.lower():
+    #             chans.append(ch)
+    #     if len(chans) == 0:
+    #         print(f"No channels selected by pick {args.pick}")
+    #         exit(1)
+    eeg = eeg.pick(picks)
 
     if args.montage:
         eeg, ch_name_unmap = fix_channels(eeg)

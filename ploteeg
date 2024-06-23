@@ -4,7 +4,7 @@ import argparse
 import os
 import tempfile
 from argparse import RawDescriptionHelpFormatter
-from os.path import splitext
+from os.path import splitext, basename
 
 import edfio
 import matplotlib.pyplot as plt
@@ -105,9 +105,9 @@ SLEEP_MONTAGE = [
     "C4",
     "O1",
     "O2",
-    "EOG ROC-A2",
-    "EOG LOC-A2",
-    "EMG CHIN",
+    "ROC",
+    "LOC",
+    "CHIN",
     "ECG I",
     "ECG II",
     "SPO2",
@@ -279,8 +279,7 @@ def read_edf(
         print("Error: All channels were dropped")
         sys.exit(1)
 
-    _, temp_filename = tempfile.mkstemp()
-    temp_filename += ".edf"
+    _, temp_filename = tempfile.mkstemp(prefix=basename(edf_filename), suffix=".edf")
     edf.write(temp_filename)
     try:
         new_edf = mne.io.read_raw(temp_filename, encoding="latin1", preload=True)
@@ -306,7 +305,13 @@ def read_edf(
 
 
 def label_eeg_using_rml(
-    eeg_filename, rml_filename, save_filename=None, overwrite=False, picks_re=None
+    eeg_filename,
+    rml_filename,
+    save_filename=None,
+    overwrite=False,
+    picks_re=None,
+    include_channel_fails=False,
+    include_respiratory=True,
 ):
     tree = ET.parse(rml_filename)
     root = tree.getroot()
@@ -342,29 +347,50 @@ def label_eeg_using_rml(
             "{http://www.respironics.com/PatientStudy.xsd}Stage"
         ):
             # print(stage.attrib["Type"],stage.attrib["Start"])
-            start = int(stage.attrib["Start"])
+            start = int(float(stage.attrib["Start"]))
             onsets.append(start)
             descriptions.append(stage.attrib["Type"])
             if last_start >= 0:
                 durations.append(start - last_start)
             last_start = start
-    durations.append(max(eeg.times))
+    if len(onsets) > 0:
+        durations.append(max(eeg.times))
 
-    print("Finding ChannelFail events")
-    # Traverse the tree extracting times marked as bad (i.e. ChannelFail)
-    events = x.find("{http://www.respironics.com/PatientStudy.xsd}Events")
-    for event in events.findall("{http://www.respironics.com/PatientStudy.xsd}Event"):
-        if event.attrib["Type"] == "ChannelFail":
-            channel = event.findall(
-                "{http://www.respironics.com/PatientStudy.xsd}ChannelFail"
-            )
-            if int(channel[0].attrib["EdfSignal"]) <= 8:
-                start = int(float(event.attrib["Start"]))
-                duration = int(float(event.attrib["Duration"]))
-                description = "bad channel"
-                onsets.append(start)
-                durations.append(duration)
-                descriptions.append(description)
+    if include_channel_fails:
+        print("Finding ChannelFail events")
+        # Traverse the tree extracting times marked as bad (i.e. ChannelFail)
+        events = x.find("{http://www.respironics.com/PatientStudy.xsd}Events")
+        for event in events.findall(
+            "{http://www.respironics.com/PatientStudy.xsd}Event"
+        ):
+            if event.attrib["Type"] == "ChannelFail":
+                channel = event.findall(
+                    "{http://www.respironics.com/PatientStudy.xsd}ChannelFail"
+                )
+                if int(channel[0].attrib["EdfSignal"]) <= 8:
+                    start = int(float(event.attrib["Start"]))
+                    duration = int(float(event.attrib["Duration"]))
+                    description = "bad channel"
+                    onsets.append(start)
+                    durations.append(duration)
+                    descriptions.append(description)
+
+    if include_respiratory:
+        print("Finding Respiratory Events")
+        events = tree.findall(".//ps:Event", namespaces=ns)
+        for element in events:
+            if element.attrib["Type"] in [
+                "CentralApnea",
+                "ObstructiveApnea",
+                "MixedApnea",
+                "CentralHypopnea",
+                "ObstructiveHypopnea",
+                "RERA",
+                "RelativeDesaturation",
+            ]:
+                onsets.append(element.attrib["Start"])
+                durations.append(element.attrib["Duration"])
+                descriptions.append(element.attrib["Type"])
 
     print("Finding Arousals")
     events = tree.findall(".//ps:Event", namespaces=ns)
@@ -373,6 +399,14 @@ def label_eeg_using_rml(
             onsets.append(element.attrib["Start"])
             durations.append(element.attrib["Duration"])
             descriptions.append("Arousal")
+
+    print("Finding Hypnos Arousals")
+    events = tree.findall(".//ps:Event", namespaces=ns)
+    for element in events:
+        if element.attrib["Type"] in ["Hypnos Arousal"]:
+            onsets.append(element.attrib["Start"])
+            durations.append(element.attrib["Duration"])
+            descriptions.append("Hypnos Arousal")
 
     print("Annotating eeg")
     # onsets, durations, descriptions = contiguous_onset_duration(
@@ -696,6 +730,14 @@ def main():
         help="display all channels using mne.io.Raw reader (slow)",
         action="store_true",
     )
+    parser.add_argument(
+        "--include-channel-fails",
+        help="mark channel fails in the plot",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--include-respiratory", help="include respiratory markers", action="store_true"
+    )
     args = parser.parse_args()
 
     excludes = None
@@ -705,7 +747,7 @@ def main():
 
     picks = None
     if args.pick is not None:
-        if args.pick == ["all"]:
+        if args.pick == ["all"] or args.all_chans:
             picks = "all"
         else:
             picks = "|".join([f"\\b{s}\\b" for s in args.pick])
@@ -737,7 +779,11 @@ def main():
         filename, ext = splitext(args.filename)
         eeg_filename = filename + "[001].edf"
         eeg = label_eeg_using_rml(
-            eeg_filename=eeg_filename, rml_filename=args.filename, picks_re=picks
+            eeg_filename=eeg_filename,
+            rml_filename=args.filename,
+            picks_re=picks,
+            include_channel_fails=args.include_channel_fails,
+            include_respiratory=args.include_respiratory,
         )
     else:
         try:
@@ -768,7 +814,7 @@ def main():
         # Convert to unique set
         unique_channel_types = set(channel_types)
         unique_channel_types_str = set(
-            mne.io.pick.channel_type(eeg.info, idx) for idx in range(len(eeg.ch_names))
+            mne.channel_type(eeg.info, idx) for idx in range(len(eeg.ch_names))
         )
 
         for ch_type in unique_channel_types_str:
@@ -844,6 +890,7 @@ def main():
 
         if args.dont_plot == False:
             fig = eeg.plot(
+                title=args.filename,
                 scalings=scalings,
                 picks="all",
                 n_epochs=args.epochs,
@@ -855,6 +902,7 @@ def main():
             fig.set_figheight(args.height)
             fig.set_figwidth(args.width)
             fig.set_layout_engine("tight")
+            fig.canvas.manager.set_window_title(args.filename)
 
     if args.save:
         if args.savename == None:
