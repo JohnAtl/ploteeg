@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+
+import argparse
+import struct
+
+def decode_hexdump(filepath):
+    """Decodes the hexdump data from the specified file and prints the numbers in pairs.
+
+    Args:
+        filepath (str): Path to the file containing hexdump data.
+    """
+    try:
+        with open(filepath, "rb") as file:
+            # Read the file content
+            data = file.read()
+
+        # Skip the header if necessary, and adjust the offset as needed
+        offset = 0x20  # Assuming data starts at offset 0x20
+        data = data[offset:]
+
+        # Decode the data as little-endian 16-bit unsigned integers
+        numbers = struct.unpack("<" + "H" * (len(data) // 2), data)
+
+        # Print numbers in pairs
+        pairs = [f"{numbers[i]},{numbers[i+1]}" for i in range(0, len(numbers) - 1, 2)]
+        print("\n".join(pairs))
+
+    except FileNotFoundError:
+        print(f"File not found: {filepath}")
+    except Exception as e:
+        print(f"Error processing file: {e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Decode hexdump data and print numbers in pairs.")
+    parser.add_argument("filename", type=str, help="Path to the file containing hexdump data")
+    args = parser.parse_args()
+
+    decode_hexdump(args.filename)
