@@ -8,11 +8,10 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
-matplotlib.use("tkagg")
+matplotlib.use("Qt5Agg")
 
 
 def load_and_plot_npz(npz_path, metadata_path, epoch_num):
-
     with open(metadata_path, "r") as file:
         metadata = load(file)
     channels = metadata["CHANNELS"]
@@ -35,10 +34,10 @@ def load_and_plot_npz(npz_path, metadata_path, epoch_num):
         row = ch_ndx // num_cols
         col = ch_ndx % num_cols
         try:
-            if num_cols>1:
+            if num_cols > 1:
                 ax = axes[row, col]
             else:
-                ax=axes[row]
+                ax = axes[row]
             ax.plot(time_vector, X[epoch_num, :, ch_ndx])
             ax.set_title(f"Channel {channels[ch_ndx]} ({ch_ndx+1})")
             ax.set_xlabel("Time (s)")
