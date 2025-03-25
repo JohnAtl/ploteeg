@@ -1,4 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run -s
+# /// script
+# requires-python = ">=3.11,<3.12"
+# dependencies = [
+#     "edfio",
+#     "matplotlib",
+#     "mne",
+#     "numpy",
+#     "pyqt5",
+# ]
+# ///
 
 import argparse
 import os
@@ -7,6 +17,7 @@ from argparse import RawDescriptionHelpFormatter
 from os.path import splitext, basename
 
 import edfio
+import matplotlib
 import matplotlib.pyplot as plt
 import mne
 
@@ -22,6 +33,8 @@ import sys
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+matplotlib.use('QtAgg')
 
 # T1/T2 are approximated by FT9/FT10
 MONTAGE = [
@@ -73,30 +86,30 @@ PHYSIOLOGICAL_SIGNALS = {
     "ECG II": "ecg",
     # Respiration
     "RR": "resp",
+    # OTHER PHYSIOLOGICAL SIGNALS
+    "FLOW PATIENT-0": "exci",
+    "FLOW PATIENT-1": "exci",
+    "FLOW PATIENT-2": "exci",
+    "EFFORT THO": "bio",
+    "EFFORT ABD": "bio",
+    "SNORE-0": "resp",
+    "SNORE-1": "resp",
+    "SPO2": "syst",
+    "PLETH": "resp",
+    "PULSERATE": "bio",
+    "LEG 2": "emg",
+    "LEG 1": "emg",
+    "BODY": "misc",
+    "XPAP CPAP": "resp",
+    "XPAP IPAP": "resp",
+    "XPAP EPAP": "resp",
+    "LEAK TOTAL": "resp",
+    "TIDVOL EXHALED": "resp",
+    "PRESSCHECK": "resp",
+    "ECG IIHF": "resp",
+    "TECHNICAL": "syst",
 }
 
-# # OTHER PHYSIOLOGICAL SIGNALS
-# "FLOW PATIENT-0": "resp",
-# "FLOW PATIENT-1": "resp",
-# "FLOW PATIENT-2": "resp",
-# "EFFORT THO": "resp",
-# "EFFORT ABD": "resp",
-# "SNORE-0": "resp",
-# "SNORE-1": "resp",
-# "SPO2": "resp",
-# "PLETH": "resp",
-# "PULSERATE": "bio",
-# "LEG 2": "emg",
-# "LEG 1": "emg",
-# "BODY": "misc",
-# "XPAP CPAP": "resp",
-# "XPAP IPAP": "resp",
-# "XPAP EPAP": "resp",
-# "LEAK TOTAL": "resp",
-# "TIDVOL EXHALED": "resp",
-# "PRESSCHECK": "resp",
-# "ECG IIHF": "resp",
-# "TECHNICAL": "syst",
 
 SLEEP_MONTAGE = [
     "F3",
@@ -171,30 +184,6 @@ EQUIVALENT_CHANNELS = {
     "T8": "T4",
 }
 
-PHYSIOLOGICAL_SIGNALS = {
-    # EOG
-    "LOC": "eog",
-    "ROC": "eog",
-    # EMG
-    "CHIN": "emg",
-    "EMG AUX1": "emg",
-    "EMG AUX2": "emg",
-    "LEG 1": "emg",
-    # Cardiac
-    "ECG I": "ecg",
-    "ECG II": "ecg",
-    "HR": "ecg",
-    # Respiration
-    "RR": "resp",
-    "PLETH": "resp",
-    "FLOW": "resp",
-    "SNORE": "resp",
-    "THOR": "resp",
-    "ABDO": "resp",
-    "SPO2": "resp",
-    # Misc
-    "BODY": "misc",
-}
 
 FS = 100
 
@@ -408,12 +397,26 @@ def label_eeg_using_rml(
             durations.append(element.attrib["Duration"])
             descriptions.append("Hypnos Arousal")
 
-    print("Annotating eeg")
+    onsets = [int(float(onset)) for onset in onsets]
+    durations = [int(float(duration)) for duration in durations]
+
+    valid_onsets = []
+    valid_durations = []
+    valid_descriptions = []
+
+    for ndx, duration in enumerate(durations):
+        if duration >= 1 and onsets[ndx] >= 0:
+            valid_onsets.append(onsets[ndx])
+            valid_durations.append(durations[ndx])
+            valid_descriptions.append(descriptions[ndx])
+
     # onsets, durations, descriptions = contiguous_onset_duration(
     #     onsets, durations, descriptions
     # )
     # Create annotations from the above labels, add to a copy of the eeg
-    annot = mne.Annotations(onset=onsets, duration=durations, description=descriptions)
+    annot = mne.Annotations(
+        onset=valid_onsets, duration=valid_durations, description=valid_descriptions
+    )
     annot_eeg = eeg.copy()
     annot_eeg.set_annotations(annot)
 
@@ -843,12 +846,19 @@ def main():
         ransac = Ransac(verbose=True, n_jobs=1)
         eeg = ransac.fit_transform(eeg)
 
-    if args.scale is None:
-        scalings = dict(eeg=1e-4, ecg=5e-4, emg=1e-4, resp=100)
-    elif args.scale == "auto":
-        scalings = "auto"
-    else:
-        scalings = dict(eeg=float(args.scale) / 2000000, ecg=2e10, emg=2e10)
+    # if args.scale is None:
+    scalings = dict(
+        eeg=1e-4,
+        ecg=5e-4,
+        emg=1e-4,
+        exci=40,  # flow
+        bio=10,  # effort
+        syst=100,  # spo2
+    )
+    # elif args.scale == "auto":
+    #     scalings = "auto"
+    # else:
+    #     scalings = dict(eeg=float(args.scale) / 2000000, ecg=2e10, emg=2e10)
 
     if args.average:
         eeg = eeg.set_eeg_reference(ref_channels="average")
