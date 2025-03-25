@@ -1,0 +1,86 @@
+#!/usr/bin/env -S uv run -s
+# /// script
+# requires-python = ">=3.11,<3.12"
+# dependencies = [
+#     "edfio",
+#     "matplotlib",
+#     "mne",
+#     "numpy",
+#     "pyqt5",
+# ]
+# ///
+
+import argparse
+
+import edfio
+
+
+def display_edf_info(filepath: str):
+    """Displays channel and metadata information for an EDF file.
+
+    Args:
+        filepath (str): Path to the EDF file.
+    """
+    try:
+        edf = edfio.read_edf(filepath)
+        # Print channel information
+        print("\nSignals:")
+        for idx, signal in enumerate(edf.signals, start=1):
+            print(f"  signal {idx:02d}: {signal.label}")
+            print(f"    - sample rate: {signal.sampling_frequency}")
+            print(f"    - physical min: {signal.physical_min}")
+            print(f"    - physical max: {signal.physical_max}")
+            print(f"    - digital min: {signal.digital_min}")
+            print(f"    - digital max: {signal.digital_max}")
+            print(f"    - transducer: {signal.transducer_type}")
+            print(f"    - prefilter: {signal.prefiltering}")
+            print(f"    - samples: {len(signal.data)}")
+            print(
+                f"    - duration: {len(signal.data) / signal.sampling_frequency:.2f} seconds"
+            )
+            print(f"    - physical dimension: {signal.physical_dimension}")
+            print(f"    - reserved: {signal.reserved}")
+
+        # Print first 10 annotations
+        print("\nAnnotations:")
+        annotations = edf.annotations
+        if annotations:
+            for idx, annotation in enumerate(annotations[:10], start=1):
+                print(f"  Annotation {idx}: {annotation}")
+        else:
+            print("  No annotations found.")
+
+        print("\nMetadata:")
+        # data_record_duration
+        print(f"  data_record_duration: {edf.data_record_duration} seconds")
+        # duration
+        print(f"  duration: {edf.duration} seconds")
+        # num_data_records
+        print(f"  num_data_records: {edf.num_data_records}")
+        # num_signals
+        print(f"  num_signals: {edf.num_signals}")
+        # patient
+        print(f"  patient: {edf.patient}")
+        # recording
+        print(f"  recording: {edf.recording}")
+        # startdate
+        print(f"  startdate: {edf.startdate}")
+        # starttime
+        print(f"  starttime: {edf.starttime}")
+        # version
+        print(f"  version: {edf.version}")
+        # labels
+        print(f"  labels: {edf.labels}")
+
+    except Exception as e:
+        print(f"Error reading EDF file: {e}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Process an EDF file and display its information."
+    )
+    parser.add_argument("filepath", type=str, help="Path to the EDF file")
+    args = parser.parse_args()
+
+    display_edf_info(args.filepath)
